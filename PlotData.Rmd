@@ -17,7 +17,7 @@ library(rstan)
 options(mc.cores = parallel::detectCores())
 ```
 
-
+##Gather and process the data
 ```{r loaddata , include=TRUE, cache=TRUE}
 
 confirmed_sheet<-read.csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv") %>%
@@ -32,11 +32,11 @@ recovered_sheet <- read.csv("https://raw.githubusercontent.com/CSSEGISandData/CO
 confirmed_long <- gather(confirmed_sheet, -Province.State , -Country.Region , key="date", value = "cases")%>%
   separate(date,c("x","date.longer"),1,remove=TRUE) %>% 
   separate(date.longer,c("month","day","year"),remove=TRUE) %>%
-  separate(Province.State,c("location","State"),sep=", ",remove=FALSE) %>% #kludge to get state for US data before 3/10/2020
+  separate(Province.State,c("location","State"),sep=", ",remove=FALSE) %>% #for US data before 3/10/2020 Province.State value includes sub-state location data. Split this out so that we can recover state level data later.
   mutate(location = as.character(location)) %>%
   mutate(State = as.character(State)) %>%
-  mutate(year=as.character(as.numeric(year)+2000)) %>%
-  unite(comb.date, c(month,day,year) , sep=".")%>% 
+  mutate(year=as.character(as.numeric(year)+2000)) %>% #data was in a format with just the last two digits for year
+  unite(comb.date, c(month,day,year) , sep=".")%>%  
   mutate(date = parse_date(comb.date , "%m%.%d%.%Y"))%>%
   select(-comb.date , -x) %>%
   mutate(delta.days=period_to_seconds(days(ymd(date) - ymd(20200122)))/(60*60*24)) %>% #calculate days since data began being collected
@@ -46,6 +46,8 @@ confirmed_long <- gather(confirmed_sheet, -Province.State , -Country.Region , ke
 
 Unfortunately the data seems to be grouped into locations that are not consistent throughout the dataset. Before March 10, 2020, the US data is presented by city or county within each state, but after March 10 it is aggregated by state. 
 
+
+For data befor March 10, go through each state to process and combine the data from the different locations.
 ```{r makeWashingtonStateData , include=TRUE, cache=TRUE}
 
 wash.data.substate <- filter(confirmed_long,Country.Region=="US" ,State=="WA") %>%  
@@ -65,15 +67,6 @@ WA.data.state <- bind_rows(wash.data.state,wash.data.substate)
 
 
 ```
-
-```{r PlotWAbyDate, include=TRUE, cache=TRUE}
-
-ggplot(data=filter(WA.data.state, total.cases>5) , aes(x=delta.days,y=log(total.cases)  )) +
-  geom_point(aes(color= wday(date , label=TRUE))) +
-    geom_smooth(method = "lm")
-
-```
-
 
 
 ```{r makeCAStateData , include=TRUE, cache=TRUE}
@@ -95,15 +88,6 @@ CA.data.state <- bind_rows(CA.data.state,CA.data.substate)
 
 
 ```
-
-```{r PlotCAbyDate, include=TRUE, cache=TRUE}
-
-ggplot(data=filter(CA.data.state, total.cases>10) , aes(x=delta.days,y=log(total.cases)  )) +
-  geom_point(aes(color= wday(date , label=TRUE))) +
-    geom_smooth(method = "lm")
-
-```
-
 
 
 ```{r makeNYStateData , include=TRUE, cache=TRUE}
@@ -150,79 +134,115 @@ MA.data.state <- bind_rows(MA.data.state,MA.data.substate)
 ```
 
 
+###Plot the stae specific data
 ```{r combineStateTotals}
 State.Totals <- bind_rows(MA.data.state,WA.data.state,CA.data.state,NY.data.state) %>% mutate(wday=wday(date,label=TRUE))
 
 
-ggplot(data=filter(State.Totals,total.cases>20) , aes(x=delta.days,y=log(total.cases, base=10) , group=State)) +
-  geom_point(aes(color= wday(date , label=TRUE)))+
-    geom_smooth( method = "lm" )+  
-  scale_y_continuous( limits=c(1,3),breaks=c(1,2,3), labels=c(10,100,1000))+
-  labs( x="days since" , y="cases per state")
-
 ggplot(data=filter(State.Totals,total.cases>20) , aes(x=delta.days,y=log(total.cases, base=10) ,color=State,  group=State)) +
   geom_point()+
     geom_smooth( method = "lm" )+  
-  scale_y_continuous( limits=c(1,3),breaks=c(1,2,3), labels=c(10,100,1000))+
+  scale_y_continuous( limits=c(1,3.5),breaks=c(1,2,3), labels=c(10,100,1000))+
   labs( x="days since Jan 22" , y="cases per state")
 
 
 ```
-##Run Stan on the data to infer true growth rate and true case counts
 
 
+
+###Plot the country specific data
+
+
+The US and China data are split by within-country region, so we must sum up the Province.State entries to get the total. 
+The new tibble confirmed_long2 has the non-aggregated US and China data removed and has them replaced by the aggregated version.
+```{r groupUSdata , include=TRUE, cache = TRUE}
+
+
+USTotals <- filter(confirmed_long,Country.Region=="US" ) %>%  
+  group_by(date, delta.days, Country.Region) %>% summarise(mean=mean(cases), count=n() ) %>%
+  mutate(total.cases = mean*count) %>% 
+  select(-mean, -count)  %>%
+#  mutate(Country.Region = "USA") %>%
+  rename(cases=total.cases) 
+
+ChinaTotals <- filter(confirmed_long,Country.Region=="China" ) %>%  
+  group_by(date, delta.days, Country.Region) %>% summarise(mean=mean(cases), count=n() ) %>%
+  mutate(total.cases = mean*count) %>% 
+  select(-mean, -count)  %>%
+  mutate(Country.Region = "China") %>%
+  rename(cases=total.cases) 
+ 
+confirmed_long2 <- bind_rows(filter(confirmed_long,Country.Region!="China",Country.Region!="US"),USTotals,ChinaTotals) 
+```
+
+
+Plot data from countries that did not have strong interventions. Use "lm" fitting to get linear fits. This is ok for the most part, the US data is poorly fit by a line up until about day 35, maybe becuase those were mostly cases of people returning to the US and not part of the local epidemic.
+```{r plotNIcountries  , include=TRUE, cache=TRUE}
+ggplot(data=filter(confirmed_long2,  Country.Region=="France"  | Country.Region=="Italy"  |  Country.Region=="Spain" | Country.Region=="Germany" | Country.Region=="United Kingdom"| Country.Region=="Brazil" |  Country.Region=="Portugal" | Country.Region=="US"  | Country.Region=="Switzerland"  | Country.Region=="Norway" | Country.Region=="Netherlands"  | Country.Region=="Denmark"   ,cases>20) , aes(x=delta.days,y=log(cases,base=10) ,color= Country.Region , group=Country.Region)) +
+  geom_point(aes(color= Country.Region))+
+    geom_smooth(method = "lm", formula = y ~ x) + 
+  scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
+  scale_x_continuous( limits=c(20,54))+
+  labs( x="days since Jan 22" , y="cases per country", title="countries without strong interventions")
+
+```
+
+Countries that seemed to have early strong intervention plans. This list is somewhat arbitrary, but these can be more clearly visualized on their own in any case. 
+```{r plotICountries , include= TRUE , cache=TRUE}
+ggplot(data=filter(confirmed_long2,Country.Region=="China" |Country.Region=="Korea, South" |Country.Region=="Japan" | Country.Region=="Singapore" |Country.Region=="Taiwan*"    ,cases>20) , aes(x=delta.days,y=log(cases,base=10) ,color= Country.Region , group=Country.Region)) +
+  geom_point(aes(color= Country.Region))+
+    geom_smooth(method = "loess",formula = y ~ x) + 
+  scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
+   scale_x_continuous( limits=c(20,54))+
+  labs( x="days since Jan 22" , y="cases per country" , title="countries with interventions")
+
+
+```
+
+
+
+
+South American countries: Leave the date-range the same so that slopes can be visually compared.
+```{r plotSACountries ,  include= TRUE , cache=TRUE}
+ggplot(data=filter(confirmed_long2,Country.Region=="Brazil" |Country.Region=="Argentina" |Country.Region=="Chile" | Country.Region=="Mexico" |Country.Region=="Peru"    ,cases>20) , aes(x=delta.days,y=log(cases,base=10) ,color= Country.Region , group=Country.Region)) +
+  geom_point(aes(color= Country.Region))+
+    geom_smooth(method = "lm", formula = y ~ x) + 
+  scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
+  scale_x_continuous( limits=c(20,54))+
+  labs( x="days since Jan 22" , y="cases per country", title="South American countries")
+  
+  
+```
+
+
+Plot Canada.
+```{r PlotCanadianProvinces, include= TRUE , cache=TRUE}
+#Canadians
+ggplot(data=filter(confirmed_long2, Country.Region=="Canada"   ,cases>20) , aes(x=delta.days,y=log(cases,base=10) ,color= Province.State , group=Province.State)) +
+  geom_point(aes(color= Province.State))+
+    geom_smooth(method = "lm", formula = y ~ x) + 
+  scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
+  scale_x_continuous( limits=c(20,54))+
+  labs( x="days since Jan 22" , y="cases per country", title="Canadian states*")
+  
+
+```
+
+
+#Do Bayesian fitting of subsets of the data
+
+This is a very un-sophisiticated method. Just assume that the number of cases on day t+1 is Poisson distributed with lambda = (cases on day t ) * lambda_1 where lambda_1 is the per case number of new infections. One thing to think about is that the cases are all supposedly taken out of circulation, so they cannot be literally infecting people on the next day, although they could have infected them before and not been detected. I think a more plausible interpretation of the model is that there are many undetected cases, of which a fraction are detected. If the fraction detected is relatively constant, then the dynamics of the detected cases match those of the undetected cases. 
+
+It would be great to build a more complex model including:
+1. testing rates and probabilty of being tested given infected, i.e. to build a model of how the medical professionals choose who to test. 
+2. day of the week effects on testing rate
+3. the incubation period
+4. variance in the infection rate due to un-measured environmental variance
+
+
+
+This writes the stan file. If you have the stan file already can leave this unevaluated
 ```{r writestan , eval=FALSE}
-
-
-sink("model_PoissonGrowth.stan")
-cat("
-
-    data {
-    int<lower=0> n; // number of time points
-    int days[n];
-    int total_cases[n] ;
-    }
-    transformed data{
-    int new_cases[n] ; #really only need n-1 but keep the indexing the same for simplicity
-    new_cases[1]=0;
-    for(i in 2:n){
-    new_cases[i]=total_cases[i]-total_cases[i-1];
-    }
-    }
-    parameters {
-    real <lower=0 , upper=50.0> lambda ; // Poisson parameter for the growth rate
-    real <lower=0, upper=1> mu ; // Probability that a true case is not detected
-    int <lower=0,upper=100 > init_cases ; // Initial number of cases
-    }
-    transformed parameters{
-    int true_cases[n];
-    int true_new_cases[n];
-    int new_observed_cases[n];
-    true_cases[1] = init_cases;
-    true_new_cases[1] = 0;
-    new_observed_cases[1] = 0
-
-    }
-    
-    model {
-    init_cases ~ poisson(total_cases[1]) ; #Prior for the true number of cases at time point 0 is Poisson with a mean equal to the observed number of cases
-    
-#should also put in a probability of observing total_cases[1] given true_cases[1]=init_cases
-
-    for(i in 2:n){
-    true_new_cases[i] ~ poisson(true_cases[i-1]*lambda); # update for each time step is the sum of Poisson RVs with mean lambda
-    true_cases[i]=true_cases[i-1]+true_new_cases[i];
-    new_observed_cases[i] ~ binomial(true_cases[i]-total_cases[i] , mu); # some of the unobserved cases may become observed
-    total_cases[i] = total_cases[i-1] + new_observed_cases[i];
-    }
-    }
-    
-    
-    
-    
-    ",fill = TRUE)
-sink()
-
 
 
 
@@ -255,83 +275,41 @@ cat("
     ",fill = TRUE)
 sink()
 
-sink("model_PoissonGaussian.stan")
-cat("
-
-    data {
-    int<lower=0> n; // number of time points
-    int days[n];
-    int total_cases[n] ;
-    }
-    transformed data{
-    int new_cases[n] ; //really only need n-1 but keep the indexing the same for simplicity
-    new_cases[1]=0;
-    for(i in 2:n){
-    new_cases[i]=total_cases[i]-total_cases[i-1];
-    }
-    }
-    parameters {
-    real <lower=0 , upper=2> lambda ; // Poisson parameter for the growth rate
-    real <lower=0> sd ; // sd for Gaussian process error
-
-    }
-    transformed parameters{
-    real dev[n]; // the deviation from the baseline poisson parameter
-    }
-    model {
-    sd ~ cauchy(0.0, 1);
-    
-    for(i in 1:n){
-    dev[i] ~ normal(0,sd);
-    }
-    
-    for(i in 2:n){
-    new_cases[i] ~ poisson(total_cases[i-1]*lambda * exp(dev[i]) ); // update for each time step is the sum of Poisson RVs with mean lambda
-    }
-    }
-    
-      
-    
-    ",fill = TRUE)
-sink()
-
-
-sink("model_PoissonGaussian.stan")
-cat("
-  data {
-    int<lower=0> n; // number of time points
-    int days[n];
-    int total_cases[n] ;
-    }
-    transformed data{
-    int new_cases[n] ; //really only need n-1 but keep the indexing the same for simplicity
-    new_cases[1]=0;
-    for(i in 2:n){
-    new_cases[i]=total_cases[i]-total_cases[i-1];
-    }
-    }
-    parameters {
-    real <lower=0 , upper=50.0> lambda ; // Poisson parameter for the growth rate
-    }
-    transformed parameters{
-      real dev[n];
-    }
-    model {
-    for(i in 2:n){
-    dev[i]~exponential(1);
-    new_cases[i] ~ poisson(total_cases[i-1]*lambda *dev[i] ); // update for each time step is the sum of Poisson RVs with mean lambda
-    }
-    }
-    
-      
-    
-    ",fill = TRUE)
-sink()
 
 ```
 
 
-```{r runstan , eval=FALSE}
+Note that the only parameter being fit is lambda, which is the per case Poisson parameter. Thus the daily multiplication factor is this lambda, and so the doubling time is log(2)/(log(1+lambda))
+
+
+US growth rate inference
+```{r runstanUS , eval=TRUE , echo=FALSE ,include=FALSE}
+mydata.sub <- filter(confirmed_long2,cases>20,Country.Region == "US")  
+
+mindays=min(mydata.sub$delta.days)
+
+
+mydata.sub <- mutate(mydata.sub,days=delta.days-mindays) %>% arrange(days)   %>%
+  rename(total_cases=cases)
+
+n=max(mydata.sub$days)+1
+
+
+stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n)) 
+
+#fit the model
+fit_poiss <- stan(file = 'model_PoissonOnly.stan', 
+                data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
+```
+
+```{r printstanUSA , eval=TRUE , echo=TRUE}
+print(fit_poiss, pars=c("lambda"),digits_summary = 3)
+
+```
+
+
+For California
+```{r runstanCA , eval=TRUE, echo=FALSE}
 mydata.sub <- filter(State.Totals,total.cases>20,State == "CA")  
 
 mindays=min(mydata.sub$delta.days)
@@ -348,127 +326,17 @@ stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n))
 #fit the model
 fit_poiss <- stan(file = 'model_PoissonOnly.stan', 
                 data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
+```
 
+
+```{r printstanCA , eval=TRUE , echo=TRUE}
 print(fit_poiss, pars=c("lambda"),digits_summary = 3)
 
 ```
 
-
-### run all at once and estimate the day of the week effect
-
-
-##Old stuff to plot all of the data by date
-
-```{r groupUSdata , include=TRUE, cache = TRUE}
-
-
-USTotals <- filter(confirmed_long,Country.Region=="US" ) %>%  
-  group_by(date, delta.days, Country.Region) %>% summarise(mean=mean(cases), count=n() ) %>%
-  mutate(total.cases = mean*count) %>% 
-  select(-mean, -count)  %>%
-  mutate(Country.Region = "USA") %>%
-  rename(cases=total.cases) 
-
-ChinaTotals <- filter(confirmed_long,Country.Region=="China" ) %>%  
-  group_by(date, delta.days, Country.Region) %>% summarise(mean=mean(cases), count=n() ) %>%
-  mutate(total.cases = mean*count) %>% 
-  select(-mean, -count)  %>%
-  mutate(Country.Region = "China") %>%
-  rename(cases=total.cases) 
- 
-confirmed_long2 <- bind_rows(filter(confirmed_long,Country.Region!="China",Country.Region!="US"),USTotals,ChinaTotals) 
-```
-
-```{r plotbydate  , include=TRUE, cache=TRUE}
-
-#Italy
-ggplot(data=filter(confirmed_long,Country.Region=="Italy",cases>20,delta.days>35) , aes(x=delta.days,y=log(cases)  , group=Province.State)) +
-  geom_point(aes(color= wday(date , label=TRUE)))+
-    geom_smooth(method = "lm")
-
-
-
-#France
-ggplot(data=filter(confirmed_long,Country.Region=="France",cases>20) , aes(x=delta.days,y=log(cases)  , group=Province.State)) +
-  geom_point(aes(color= wday(date , label=TRUE)))+
-    geom_smooth(method = "lm")
-
-
-#France and Italy
-ggplot(data=filter(confirmed_long,Country.Region=="Italy" | Country.Region=="France"  | Country.Region=="Spain" | Country.Region=="Germany" | Country.Region=="United Kingdom"   ,cases>20) , aes(x=delta.days,y=log(cases)  , group=Country.Region)) +
-  geom_point(aes(color= wday(date , label=TRUE)))+
-    geom_smooth(method = "lm")
-
-
-
-
-#Plot a bunch of countries
-ggplot(data=filter(confirmed_long2,  Country.Region=="France"  | Country.Region=="Italy"  |  Country.Region=="Spain" | Country.Region=="Germany" | Country.Region=="United Kingdom"| Country.Region=="Brazil" |  Country.Region=="Portugal" | Country.Region=="USA"  | Country.Region=="Switzerland"  | Country.Region=="Norway" | Country.Region=="Netherlands"  | Country.Region=="Denmark"   ,cases>20) , aes(x=delta.days,y=log(cases,base=10) ,color= Country.Region , group=Country.Region)) +
-  geom_point(aes(color= Country.Region))+
-    geom_smooth(method = "lm") + 
-  scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
-  scale_x_continuous( limits=c(20,54))+
-  labs( x="days since Jan 22" , y="cases per state", title="countries without strong interventions")
-
-
-
-#Plot countries with interventions
-ggplot(data=filter(confirmed_long2,Country.Region=="China" |Country.Region=="Korea, South" |Country.Region=="Japan" | Country.Region=="Singapore" |Country.Region=="Taiwan*"    ,cases>20) , aes(x=delta.days,y=log(cases,base=10) ,color= Country.Region , group=Country.Region)) +
-  geom_point(aes(color= Country.Region))+
-    geom_smooth(method = "loess") + 
-  scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
-   scale_x_continuous( limits=c(20,54))+
-  labs( x="days since Jan 22" , y="cases per state" , title="countries with interventions")
-
-
-
-
-#South americans
-ggplot(data=filter(confirmed_long2,Country.Region=="Brazil" |Country.Region=="Argentina" |Country.Region=="Chile" | Country.Region=="Mexico" |Country.Region=="Peru"    ,cases>20) , aes(x=delta.days,y=log(cases,base=10) ,color= Country.Region , group=Country.Region)) +
-  geom_point(aes(color= Country.Region))+
-    geom_smooth(method = "lm") + 
-  scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
-   scale_x_continuous( limits=c(20,54))+
-  labs( x="days since Jan 22" , y="cases per state" , title="countries with interventions")
-
-
-
-#Canadians
-ggplot(data=filter(confirmed_long2, Country.Region=="Canada"   ,cases>20) , aes(x=delta.days,y=log(cases,base=10) ,color= Province.State , group=Province.State)) +
-  geom_point(aes(color= Province.State))+
-    geom_smooth(method = "lm") + 
-  scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
-   scale_x_continuous( limits=c(20,54))+
-  labs( x="days since Jan 22" , y="cases per state" , title="countries with interventions")
-
-```
-
-
-
-```{r runstanUSA , eval=FALSE}
-mydata.sub <- filter(confirmed_long2,cases>20,Country.Region == "USA")  
-
-mindays=min(mydata.sub$delta.days)
-
-
-mydata.sub <- mutate(mydata.sub,days=delta.days-mindays) %>% arrange(days)   %>%
-  rename(total_cases=cases)
-
-n=max(mydata.sub$days)+1
-
-
-stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n)) 
-
-#fit the model
-fit_poiss <- stan(file = 'model_PoissonOnly.stan', 
-                data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
-
-print(fit_poiss, pars=c("lambda"),digits_summary = 3)
-
-```
-
-```{r runstanCA , eval=FALSE}
-mydata.sub <- filter(State.Totals,total.cases>20,total.cases<101,State == "CA")  
+For New York
+```{r runstanNY , eval=TRUE, echo=FALSE}
+mydata.sub <- filter(State.Totals,total.cases>20,State == "NY")  
 
 mindays=min(mydata.sub$delta.days)
 
@@ -484,37 +352,19 @@ stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n))
 #fit the model
 fit_poiss <- stan(file = 'model_PoissonOnly.stan', 
                 data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
+```
 
+
+```{r printstanNY , eval=TRUE , echo=TRUE}
 print(fit_poiss, pars=c("lambda"),digits_summary = 3)
 
 ```
 
 
-```{r runstanCA , eval=FALSE}
-mydata.sub <- filter(State.Totals,total.cases>100,State == "CA")  
 
-mindays=min(mydata.sub$delta.days)
-
-
-mydata.sub <- mutate(mydata.sub,days=delta.days-mindays) %>% arrange(days)   %>%
-  rename(total_cases=total.cases)
-
-n=max(mydata.sub$days)+1
-
-
-stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n)) 
-
-#fit the model
-fit_poiss <- stan(file = 'model_PoissonOnly.stan', 
-                data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
-
-print(fit_poiss, pars=c("lambda"),digits_summary = 3)
-
-```
-
-
-```{r runstanItaly , eval=FALSE}
-mydata.sub <- filter(confirmed_long2,cases>20,cases<50000,Country.Region == "Italy")  
+Italy
+```{r runstanItaly, eval=TRUE, echo=FALSE}
+mydata.sub <- filter(confirmed_long2,cases>20,Country.Region == "Italy")  
 
 mindays=min(mydata.sub$delta.days)
 
@@ -530,14 +380,16 @@ stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n))
 #fit the model
 fit_poiss <- stan(file = 'model_PoissonOnly.stan', 
                 data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
+```
 
+```{r printstanItaly , eval=TRUE , echo=TRUE}
 print(fit_poiss, pars=c("lambda"),digits_summary = 3)
 
 ```
 
 
-
-```{r runstanFrance , eval=FALSE}
+France
+```{r runstanFrance, eval=TRUE, echo=FALSE}
 mydata.sub <- filter(confirmed_long2,cases>20,cases<50000,Country.Region == "France")  
 
 mindays=min(mydata.sub$delta.days)
@@ -554,14 +406,17 @@ stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n))
 #fit the model
 fit_poiss <- stan(file = 'model_PoissonOnly.stan', 
                 data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
+```
 
+
+```{r printstanFrance , eval=TRUE , echo=TRUE}
 print(fit_poiss, pars=c("lambda"),digits_summary = 3)
 
 ```
 
 
-
-```{r runstanBrazil , eval=FALSE}
+Brazil
+```{r runstanBrazil , eval=TRUE , echo = FALSE}
 mydata.sub <- filter(confirmed_long2,cases>20,cases<50000,Country.Region == "Brazil")  
 
 mindays=min(mydata.sub$delta.days)
@@ -578,12 +433,18 @@ stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n))
 #fit the model
 fit_poiss <- stan(file = 'model_PoissonOnly.stan', 
                 data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
+```
+
+
+```{r printstanBrazil , eval=TRUE , echo=TRUE}
 
 print(fit_poiss, pars=c("lambda"),digits_summary = 3)
 
 ```
 
 
+
+And for the Canadians
 
 ```{r runstanOntario , eval=FALSE}
 mydata.sub <- filter(confirmed_long2,cases>20,Province.State == "Ontario")  
@@ -602,6 +463,10 @@ stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n))
 #fit the model
 fit_poiss <- stan(file = 'model_PoissonOnly.stan', 
                 data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
+```
+
+
+```{r printstanOntario , eval=TRUE , echo=TRUE}
 
 print(fit_poiss, pars=c("lambda"),digits_summary = 3)
 
@@ -626,7 +491,37 @@ stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n))
 #fit the model
 fit_poiss <- stan(file = 'model_PoissonOnly.stan', 
                 data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
+```
 
+```{r printstanBC , eval=TRUE , echo=TRUE}
+print(fit_poiss, pars=c("lambda"),digits_summary = 3)
+
+```
+
+
+
+
+```{r runstanAB , eval=FALSE}
+mydata.sub <- filter(confirmed_long2,cases>20,Province.State == "Alberta")  
+
+mindays=min(mydata.sub$delta.days)
+
+
+mydata.sub <- mutate(mydata.sub,days=delta.days-mindays) %>% arrange(days)   %>%
+  rename(total_cases=cases)
+
+n=max(mydata.sub$days)+1
+
+
+stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n)) 
+
+#fit the model
+fit_poiss <- stan(file = 'model_PoissonOnly.stan', 
+                data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
+```
+
+
+```{r printstanAB , eval=TRUE , echo=TRUE}
 print(fit_poiss, pars=c("lambda"),digits_summary = 3)
 
 ```
