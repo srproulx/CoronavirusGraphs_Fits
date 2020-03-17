@@ -41,6 +41,10 @@ confirmed_long <- gather(confirmed_sheet, -Province.State , -Country.Region , ke
   select(-comb.date , -x) %>%
   mutate(delta.days=period_to_seconds(days(ymd(date) - ymd(20200122)))/(60*60*24)) %>% #calculate days since data began being collected
   as_tibble()  
+
+
+maxdays=max(confirmed_long$delta.days)
+
 ```
 
 
@@ -182,7 +186,7 @@ ggplot(data=filter(confirmed_long2,  Country.Region=="France"  | Country.Region=
   geom_point(aes(color= Country.Region))+
     geom_smooth(method = "lm", formula = y ~ x) + 
   scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
-  scale_x_continuous( limits=c(20,54))+
+  scale_x_continuous( limits=c(20,56))+
   labs( x="days since Jan 22" , y="cases per country", title="countries without strong interventions")
 
 ```
@@ -193,7 +197,7 @@ ggplot(data=filter(confirmed_long2,Country.Region=="China" |Country.Region=="Kor
   geom_point(aes(color= Country.Region))+
     geom_smooth(method = "loess",formula = y ~ x) + 
   scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
-   scale_x_continuous( limits=c(20,54))+
+   scale_x_continuous( limits=c(20,maxdays+2))+
   labs( x="days since Jan 22" , y="cases per country" , title="countries with interventions")
 
 
@@ -208,7 +212,7 @@ ggplot(data=filter(confirmed_long2,Country.Region=="Brazil" |Country.Region=="Ar
   geom_point(aes(color= Country.Region))+
     geom_smooth(method = "lm", formula = y ~ x) + 
   scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
-  scale_x_continuous( limits=c(20,54))+
+  scale_x_continuous( limits=c(20,maxdays+2))+
   labs( x="days since Jan 22" , y="cases per country", title="South American countries")
   
   
@@ -222,7 +226,7 @@ ggplot(data=filter(confirmed_long2, Country.Region=="Canada"   ,cases>20) , aes(
   geom_point(aes(color= Province.State))+
     geom_smooth(method = "lm", formula = y ~ x) + 
   scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
-  scale_x_continuous( limits=c(20,54))+
+  scale_x_continuous( limits=c(20,maxdays+2))+
   labs( x="days since Jan 22" , y="cases per country", title="Canadian states*")
   
 
@@ -238,6 +242,8 @@ It would be great to build a more complex model including:
 2. day of the week effects on testing rate
 3. the incubation period
 4. variance in the infection rate due to un-measured environmental variance
+
+The process model itself could be improved by including SIR dynamics. This means assuming that tested individuals are removed from the pool of individuals able to transmit the virus, and also that untested recovered individuals no longer transmit.
 
 
 
