@@ -1,11 +1,7 @@
-#
-# This is a Shiny web application. You can run the application by clicking
-# the 'Run App' button above.
-#
-# Find out more about building applications with Shiny here:
-#
-#    http://shiny.rstudio.com/
-#
+# A little shiny app to compare the log growth estimates of two segments of coronavirus case number data 
+# Written by Stephen Proulx sproul@ucsb.edu
+# library(rsconnect)
+# rsconnect::deployApp('/Users/proulx/coronavirusEstimator/CoronavirusGraphs_Fits/CompareCoronaRates')
 
 library(shiny)
 
@@ -75,51 +71,59 @@ country_list <- confirmed_long2 %>% filter(delta.days==maxdays) %>% arrange(desc
 country_list_alpha <- confirmed_long2 %>% filter(delta.days==maxdays,cases>100) %>% arrange(Country.Region) %>% select(Country.Region)
 
 
-# Define UI for application that draws a histogram
+# Define UI
 ui <- fluidPage(
 
     # Application title
     titlePanel("Compare two regions"),
 
-    # Sidebar with a slider input for number of bins 
+    
     sidebarLayout(
         sidebarPanel(
             selectInput("country1", "Country 1:",
-                        country_list),
+                        country_list,
+                        selected = "US"),
             selectInput("country2", "Country 2:",
-                        country_list_alpha),
+                        country_list_alpha,
+                        selected = "Italy"),
             
             sliderInput("start1",
                         "Start day 1:",
                         min = 1,
-                        max = 60,
-                        value = 25),
+                        max = maxdays,
+                        value = 38),
             sliderInput("end1",
                         "End day 1:",
                         min = 1,
-                        max = 60,
-                        value = 60),
+                        max = maxdays,
+                        value = maxdays),
             sliderInput("start2",
                         "Start day 2:",
                         min = 1,
-                        max = 60,
-                        value = 25),
+                        max = maxdays,
+                        value = 45),
             sliderInput("end2",
                         "End day 2:",
                         min = 1,
-                        max = 60,
-                        value = 60),
+                        max = maxdays,
+                        value = maxdays),
+            sliderInput("pstrength",
+                        "Advanced: Strength of the prior that the two periods are the same",
+                        round = -2, step = 0.01,
+                        min = 0,
+                        max = 2,
+                        value = 0.5),
             actionButton("do", "Run Models")
         ),
 
         # Show a plot of the generated distribution
         mainPanel(
-            plotOutput("country1"),plotOutput("country2"),plotOutput("compare")
+            plotOutput("country1"),plotOutput("compare")
         )
     )
 )
 
-# Define server logic required to draw a histogram
+# Define server logic 
 server <- function(input, output) {
     
     observeEvent(input$do, {
@@ -143,39 +147,97 @@ server <- function(input, output) {
     
     total_datapoints=nrow(mydata.sub.total)
     
-    stan_data <- c(mydata.sub.total[c("days","total_cases","dataset")],tocomp[c("country")],list(maxdays=maxdays,total_datapoints=total_datapoints , pstrength =0.5)) 
+    stan_data <- c(mydata.sub.total[c("days","total_cases","dataset")],tocomp[c("country")],list(maxdays=maxdays,total_datapoints=total_datapoints , pstrength = input$pstrength)) 
     
     
     fit_poissCompare <- stan(file = 'model_compare2.stan', 
                              data =stan_data, chains = 8,iter = 5000, seed = 2131231 )
     
     
-    posterior <- as.matrix(fit_poissCompare)
+    tmp<-as.data.frame(rstan::extract(fit_poissCompare,pars=c("mean_lambda","lambda_diff","lambda[1]","lambda[2]"))) %>% 
+        rename("lambda1"="lambda.1.","lambda2"="lambda.2.")
     
-    output$compare <-  renderPlot({mcmc_areas(posterior,
-               pars = c("lambda_diff"),
-               prob = 0.99) })
+    
+    tmp1<-tmp %>%select(lambda1) %>%rename(mode=lambda1) %>%mutate(parameter="lambda1") %>% mutate(dtime=log(2)/(log(1+mode)))
+    tmp2<-tmp %>%select(lambda2) %>%rename(mode=lambda2) %>%mutate(parameter="lambda2") %>% mutate(dtime=log(2)/(log(1+mode)))
+    tmp<-rbind(tmp1,tmp2)
+    
+    
+    lq=0.025
+    uq=0.975
+    d1<-density(tmp1$dtime)
+    dd1 <- with(d1,data.frame(x,y)) %>% filter(y>0.01)
+    qs1=quantile(ecdf(tmp1$dtime),prob=c(lq,0.5,uq))
+    d2<-density(tmp2$dtime)
+    dd2 <- with(d2,data.frame(x,y)) %>% filter(y>0.01)
+    qs2=quantile(ecdf(tmp2$dtime),prob=c(lq,0.5,uq))
+    
+    maxdd1=max(dd1$y)
+    dd1<-mutate(dd1,rely=y/maxdd1)
+    maxdd2=max(dd2$y)
+    dd2<-mutate(dd2,rely=y/maxdd2)
+    
+    
+    output$compare <-  renderPlot({   
+        ggplot(data=dd1 , aes(x,rely))+
+            geom_line(data=dd1)+
+            geom_ribbon(data=filter(dd1,x>qs1[[1]] & x<qs1[[3]]),aes(ymax=rely),ymin=0,
+                        fill="#1B9E77",colour=NA,alpha=0.5)+
+            geom_line(data=dd2)+
+            geom_ribbon(data=filter(dd2,x>qs2[[1]] & x<qs2[[3]]),aes(ymax=rely),ymin=0,
+                        fill="#D95F02",colour=NA,alpha=0.5)+
+            scale_y_continuous(limits=c(0,1.5),name="Posterior Density")+
+            scale_x_continuous(name="Doubling Time", limits=c(2, 6)) +
+            annotate("text", x=c(qs1[[2]],qs2[[2]]),
+                     y=1.2, label= c(str_c(input$country1, " 1"),str_c(input$country2, " 2")),
+                     size=3)+
+            theme_bw()+
+            theme( axis.text=element_text(family="Helvetica", size=8),text=element_text(family="Helvetica", size=12))
     })
+        
     
+#    posterior <- as.matrix(fit_poissCompare)
+    
+#    output$compare <-  renderPlot({mcmc_areas(posterior, pars = c("lambda_diff"),prob = 0.99) })
 
+})
+    
+    
+    
+    
     output$country1 <- renderPlot({
-        ggplot(data=filter(confirmed_long2,  Country.Region==input$country1  ,delta.days>input$start1  ,delta.days<input$end1 ,cases>20) , aes(x=delta.days,y=log(cases,base=10))) +
+        data1<-filter(confirmed_long2,  Country.Region==input$country1,delta.days>input$start1  ,delta.days<input$end1 ,cases>20) %>% 
+            mutate(country=input$country1 ,dataset=1) %>% unite("country_set",country:dataset)
+        data2<-filter(confirmed_long2,  Country.Region==input$country2  ,delta.days>input$start2  ,delta.days<input$end2 ,cases>20) %>% 
+            mutate(country=input$country2 ,dataset=2) %>% unite("country_set",country:dataset)
+        datatot<-bind_rows(data1,data2)
+        
+            ggplot(data=datatot , aes(x=delta.days,y=log(cases,base=10) , color=country_set,group=country_set)) +
             geom_point()+
             geom_smooth(method = "lm", formula = y ~ x) + 
             scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
             scale_x_continuous( limits=c(20,56))+
-            labs( x="days since Jan 22" , y="cases", title=input$country1)
+            labs( x="days since Jan 22" , y="cases", title="Log case numbers")
     })
-    
-    output$country2 <- renderPlot({
-        ggplot(data=filter(confirmed_long2,  Country.Region==input$country2 ,delta.days>input$start2  ,delta.days<input$end2  ,cases>20) , aes(x=delta.days,y=log(cases,base=10) )) +
-            geom_point()+
-            geom_smooth(method = "lm", formula = y ~ x) + 
-            scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
-            scale_x_continuous( limits=c(20,56))+
-            labs( x="days since Jan 22" , y="cases", title=input$country2)
-    })
-    
+
+    # output$country1 <- renderPlot({
+    #     ggplot(data=filter(confirmed_long2,  Country.Region==input$country1  ,delta.days>input$start1  ,delta.days<input$end1 ,cases>20) , aes(x=delta.days,y=log(cases,base=10))) +
+    #         geom_point()+
+    #         geom_smooth(method = "lm", formula = y ~ x) + 
+    #         scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
+    #         scale_x_continuous( limits=c(20,56))+
+    #         labs( x="days since Jan 22" , y="cases", title=input$country1)
+    # })
+    # 
+    # output$country2 <- renderPlot({
+    #     ggplot(data=filter(confirmed_long2,  Country.Region==input$country2 ,delta.days>input$start2  ,delta.days<input$end2  ,cases>20) , aes(x=delta.days,y=log(cases,base=10) )) +
+    #         geom_point()+
+    #         geom_smooth(method = "lm", formula = y ~ x) + 
+    #         scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
+    #         scale_x_continuous( limits=c(20,56))+
+    #         labs( x="days since Jan 22" , y="cases", title=input$country2)
+    # })
+    # 
     
     
 
