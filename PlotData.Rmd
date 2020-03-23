@@ -139,14 +139,14 @@ MA.data.state <- bind_rows(MA.data.state,MA.data.substate)
 
 
 ###Plot the stae specific data
-```{r combineStateTotals}
+```{r plotStateTotals}
 State.Totals <- bind_rows(MA.data.state,WA.data.state,CA.data.state,NY.data.state) %>% mutate(wday=wday(date,label=TRUE))
 
 
 ggplot(data=filter(State.Totals,total.cases>20) , aes(x=delta.days,y=log(total.cases, base=10) ,color=State,  group=State)) +
   geom_point()+
     geom_smooth( method = "lm" )+  
-  scale_y_continuous( limits=c(1,3.5),breaks=c(1,2,3), labels=c(10,100,1000))+
+  scale_y_continuous( limits=c(1,5),breaks=c(1,2,3,4), labels=c(10,100,1000,10000))+
   labs( x="days since Jan 22" , y="cases per state")
 
 
@@ -222,12 +222,13 @@ ggplot(data=filter(confirmed_long2,Country.Region=="Brazil" |Country.Region=="Ar
 Plot Canada.
 ```{r PlotCanadianProvinces, include= TRUE , cache=TRUE}
 #Canadians
-ggplot(data=filter(confirmed_long2, Country.Region=="Canada"   ,cases>20) , aes(x=delta.days,y=log(cases,base=10) ,color= Province.State , group=Province.State)) +
+ggplot(data=filter(confirmed_long2, Country.Region=="Canada"   ,cases>5) , aes(x=delta.days,y=log(cases,base=10) ,color= Province.State , group=Province.State)) +
   geom_point(aes(color= Province.State))+
     geom_smooth(method = "lm", formula = y ~ x) + 
   scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
   scale_x_continuous( limits=c(20,maxdays+2))+
   labs( x="days since Jan 22" , y="cases per country", title="Canadian states*")
+ 
   
 
 ```
@@ -531,3 +532,174 @@ fit_poiss <- stan(file = 'model_PoissonOnly.stan',
 print(fit_poiss, pars=c("lambda"),digits_summary = 3)
 
 ```
+
+
+##Did the curve in Italy ever change?
+
+```{r writestan_singleswitchpoint , eval=FALSE}
+
+
+
+sink("model_PoissonSwitch.stan")
+cat("
+
+    data {
+    int<lower=0> n; // number of time points
+    int switchday ; // maximum day in the dataset. Set as a real for breakpoint analysis even though it is an integer
+    int days[n];
+    int total_cases[n] ;
+    }
+    transformed data{
+    int new_cases[n] ; //really only need n-1 but keep the indexing the same for simplicity
+    new_cases[1]=0;
+    for(i in 2:n){
+    new_cases[i]=total_cases[i]-total_cases[i-1];
+    }
+    }
+    parameters {
+    real <lower=0 , upper=50.0> lambda[2] ; // Poisson parameter for the growth rate
+    }
+    model {
+    for(i in 2:(switchday-1)){
+    new_cases[i] ~ poisson(total_cases[i-1]* lambda[1] ); // update for each time step is the sum of Poisson RVs with mean lambda
+    } // update the likelihood for the early days
+    for(i in switchday:n){
+    new_cases[i] ~ poisson(total_cases[i-1]*lambda[2]); // update for each time step is the sum of Poisson RVs with mean lambda
+    } // update for the latter days
+
+    }
+    
+      
+    
+    ",fill = TRUE)
+sink()
+
+
+```
+
+
+```{r runstanItaly , eval=TRUE , echo=FALSE ,include=FALSE}
+mydata.sub <- filter(confirmed_long2,cases>20,Country.Region == "Italy")  
+
+mindays=min(mydata.sub$delta.days)
+
+
+mydata.sub <- mutate(mydata.sub,days=delta.days-mindays) %>% arrange(days)   %>%
+  rename(total_cases=cases)
+
+n=max(mydata.sub$days)+1
+
+
+stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n , switchday=21)) 
+
+#fit the model
+fit_poissSwitch <- stan(file = 'model_PoissonSwitch.stan', 
+                data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
+```
+
+```{r printStanSwitchItaly , eval=TRUE , echo=TRUE}
+
+print(fit_poissSwitch, pars=c("lambda"),digits_summary = 3)
+
+```
+
+```{r writestan_quadraticfit , eval=FALSE}
+
+
+
+sink("model_PoissonQuad.stan")
+cat("
+
+    data {
+    int<lower=0> n; // number of time points
+    int switchday ; // maximum day in the dataset. Set as a real for breakpoint analysis even though it is an integer
+    int days[n];
+    int total_cases[n] ;
+    }
+    transformed data{
+    int new_cases[n] ; //really only need n-1 but keep the indexing the same for simplicity
+    new_cases[1]=0;
+    for(i in 2:n){
+    new_cases[i]=total_cases[i]-total_cases[i-1];
+    }
+    }
+    parameters {
+    real x[2]; // parameters for quadratic fit
+//    real <lower=0 , upper=50.0> lambda[2] ; // Poisson parameter for the growth rate
+    }
+    model {
+    x[1]~normal(0.4,.2);
+    x[2]~normal(0,.05);
+    for(i in 2:n){
+    new_cases[i] ~ poisson(total_cases[i-1]* (x[1] + i * x[2] ) ); // update for each time step is the sum of Poisson RVs with mean lambda
+    } // update for the latter days
+
+    }
+    
+      
+    
+    ",fill = TRUE)
+sink()
+
+
+```
+
+
+```{r runstanItaly , eval=TRUE , echo=FALSE ,include=FALSE}
+mydata.sub <- filter(confirmed_long2,cases>20,Country.Region == "Italy")  
+
+mindays=min(mydata.sub$delta.days)
+
+
+mydata.sub <- mutate(mydata.sub,days=delta.days-mindays) %>% arrange(days)   %>%
+  rename(total_cases=cases)
+
+n=max(mydata.sub$days)+1
+
+
+stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n , switchday=20)) 
+
+#fit the model
+fit_poissQuad <- stan(file = 'model_PoissonQuad.stan', 
+                data =stan_data, chains = 8,iter = 15000, seed = 2131231 )
+```
+
+
+```{r printStanSwitchItaly , eval=TRUE , echo=TRUE}
+
+print(fit_poissQuad, pars=c("x"),digits_summary = 3)
+
+pairs(fit_poissQuad, pars=c("x"))
+
+
+```
+
+
+
+
+```{r runstanUS , eval=TRUE , echo=FALSE ,include=FALSE}
+mydata.sub <- filter(confirmed_long2,cases>60,Country.Region == "US")  
+
+mindays=min(mydata.sub$delta.days)
+
+
+mydata.sub <- mutate(mydata.sub,days=delta.days-mindays) %>% arrange(days)   %>%
+  rename(total_cases=cases)
+
+n=max(mydata.sub$days)+1
+
+view(mydata.sub)
+
+stan_data <- c(mydata.sub[c("days","total_cases")], list(n=n , switchday=13)) 
+
+#fit the model
+fit_poissSwitch <- stan(file = 'model_PoissonSwitch.stan', 
+                data =stan_data, chains = 4,iter = 1000, seed = 2131231 )
+```
+
+```{r printStanSwitchItaly , eval=TRUE , echo=TRUE}
+
+print(fit_poissSwitch, pars=c("lambda"),digits_summary = 3)
+
+```
+
