@@ -35,7 +35,7 @@ confirmed_long <- gather(confirmed_sheet, -Province.State , -Country.Region , ke
     as_tibble()  
 
 
-maxdays=max(confirmed_long$delta.days)
+maxdays=max(confirmed_long$delta.days)-1
 
 
 
@@ -69,6 +69,9 @@ confirmed_long2 <- bind_rows(filter(confirmed_long,Country.Region!="Canada",Coun
 country_list <- confirmed_long2 %>% filter(delta.days==maxdays) %>% arrange(desc(cases)) %>% select(Country.Region)
 #countries in alphabetical order but only with more than 100 cases
 country_list_alpha <- confirmed_long2 %>% filter(delta.days==maxdays,cases>100) %>% arrange(Country.Region) %>% select(Country.Region)
+
+mod <- readRDS("model.rds") 
+
 
 
 # Define UI
@@ -149,8 +152,11 @@ server <- function(input, output) {
     
     stan_data <- c(mydata.sub.total[c("days","total_cases","dataset")],tocomp[c("country")],list(maxdays=maxdays,total_datapoints=total_datapoints , pstrength = input$pstrength)) 
     
-    
-    fit_poissCompare <- stan(file = 'model_compare2.stan', 
+ 
+#    fit_poissCompare <- sampling(mod, 
+#                    data =stan_data, chains = 8,iter = 5000, seed = 2131231 )
+                             
+   fit_poissCompare <- stan(file = 'model_compare2.stan', 
                              data =stan_data, chains = 8,iter = 5000, seed = 2131231 )
     
     
@@ -187,7 +193,7 @@ server <- function(input, output) {
             geom_ribbon(data=filter(dd2,x>qs2[[1]] & x<qs2[[3]]),aes(ymax=rely),ymin=0,
                         fill="#D95F02",colour=NA,alpha=0.5)+
             scale_y_continuous(limits=c(0,1.5),name="Posterior Density")+
-            scale_x_continuous(name="Doubling Time", limits=c(2, 6)) +
+            scale_x_continuous(name="Doubling Time", limits=c(2, 8)) +
             annotate("text", x=c(qs1[[2]],qs2[[2]]),
                      y=1.2, label= c(str_c(input$country1, " 1"),str_c(input$country2, " 2")),
                      size=3)+
@@ -206,9 +212,9 @@ server <- function(input, output) {
     
     
     output$country1 <- renderPlot({
-        data1<-filter(confirmed_long2,  Country.Region==input$country1,delta.days>input$start1  ,delta.days<input$end1 ,cases>20) %>% 
+        data1<-filter(confirmed_long2,  Country.Region==input$country1,delta.days>(input$start1-1)  ,delta.days<(input$end1+1) ,cases>20) %>% 
             mutate(country=input$country1 ,dataset=1) %>% unite("country_set",country:dataset)
-        data2<-filter(confirmed_long2,  Country.Region==input$country2  ,delta.days>input$start2  ,delta.days<input$end2 ,cases>20) %>% 
+        data2<-filter(confirmed_long2,  Country.Region==input$country2  ,delta.days>(input$start2-1)  ,delta.days<(input$end2+1) ,cases>20) %>% 
             mutate(country=input$country2 ,dataset=2) %>% unite("country_set",country:dataset)
         datatot<-bind_rows(data1,data2)
         
@@ -216,7 +222,7 @@ server <- function(input, output) {
             geom_point()+
             geom_smooth(method = "lm", formula = y ~ x) + 
             scale_y_continuous( limits=c(1,6),breaks=c(1,2,3,4,5), labels=c(10,100,1000,10000,100000))+
-            scale_x_continuous( limits=c(20,56))+
+            scale_x_continuous( limits=c(20,maxdays))+
             labs( x="days since Jan 22" , y="cases", title="Log case numbers")
     })
 
