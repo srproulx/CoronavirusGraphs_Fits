@@ -98,8 +98,8 @@ server <- function(input, output) {
             mutate(n=endday-startday)
         
         
-        mydata.sub1 <- filter(confirmed_long, delta.days>=tocomp$startday[1],delta.days<=tocomp$endday[1],state == tocomp$state[1]) %>% mutate(dataset=1)   
-        mydata.sub2 <- filter(confirmed_long, delta.days>=tocomp$startday[2],delta.days<=tocomp$endday[2],state == tocomp$state[2]) %>% mutate(dataset=2)
+        mydata.sub1 <- filter(confirmed_long, delta.days>=tocomp$startday[1],delta.days<=tocomp$endday[1],state == tocomp$state[1] , cases>25 ) %>% mutate(dataset=1)   
+        mydata.sub2 <- filter(confirmed_long, delta.days>=tocomp$startday[2],delta.days<=tocomp$endday[2],state == tocomp$state[2] , cases>25 ) %>% mutate(dataset=2)
         
         mindays=c(min(mydata.sub1$delta.days),min(mydata.sub2$delta.days))
         
@@ -146,21 +146,38 @@ server <- function(input, output) {
         maxdd2=max(dd2$y)
         dd2<-mutate(dd2,rely=y/maxdd2)
         
+        upperlim=max(qs1[3],qs2[3])+0.5
+        lowerlim=min(qs1[1],qs2[1])-0.5
+        ddata<-bind_rows(mutate(tmp1,state=str_c(input$state1, " 1")),mutate(tmp2,state=str_c(input$state2, " 2"))) 
         
-        output$compare <-  renderPlot({  
-            boxdata=tibble(state=c(str_c(input$state1, " 1"), str_c(input$state1, " 2")), medians=c(qs1[2],qs2[2]) , lower=c(qs1[1],qs2[1]), upper=c(qs1[3],qs2[3]))
-            
-            ggplot(data=boxdata , aes(state,medians))+
-                geom_point(sie=5) +
-                geom_errorbar(aes(ymin=lower,ymax=upper),  width=0.5 )+
-                scale_y_continuous(limits=c(0,10),name="Days until cases double")+
-                annotate("text", x=c(1,2),
-                         y=c(qs1[1]-.5,qs2[1]-.5), label= c(str_c(input$state1, " 1"),str_c(input$state2, " 2")),
-                         size=5)+
-                 coord_fixed(ratio = 1/5) +
-                theme_bw()+
-                theme( axis.text=element_text(family="Helvetica", size=8),text=element_text(family="Helvetica", size=12))
+        output$compare <-  renderPlot({
+        ggplot(data=ddata ) +
+            geom_violin( aes(y=dtime,x=state ,  fill=state))+
+            scale_y_continuous(limits=c(lowerlim,upperlim),name="Days until cases double")+
+            scale_color_manual(breaks = c(str_c(input$state1, " 1"),str_c(input$state1, " 2")),values=c( "magenta","blue"))+
+            annotate("text", x=c(0.8,1.8),
+                     y=c(qs1[2]+0.25,qs2[2]+0.25), label= c(str_c(input$state1, " 1"),str_c(input$state2, " 2")),
+                     size=3)+
+            theme_bw()+
+            theme( axis.text=element_text(family="Helvetica", size=8),text=element_text(family="Helvetica", size=12),legend.position = "none")
+        
         })
+        
+        
+        # output$compare <-  renderPlot({  
+        #     boxdata=tibble(state=c(str_c(input$state1, " 1"), str_c(input$state1, " 2")), medians=c(qs1[2],qs2[2]) , lower=c(qs1[1],qs2[1]), upper=c(qs1[3],qs2[3]))
+        #     
+        #     ggplot(data=boxdata , aes(state,medians))+
+        #         geom_point(sie=5) +
+        #         geom_errorbar(aes(ymin=lower,ymax=upper),  width=0.5 )+
+        #         scale_y_continuous(limits=c(0,10),name="Days until cases double")+
+        #         annotate("text", x=c(1,2),
+        #                  y=c(qs1[1]-.5,qs2[1]-.5), label= c(str_c(input$state1, " 1"),str_c(input$state2, " 2")),
+        #                  size=5)+
+        #          coord_fixed(ratio = 1/5) +
+        #         theme_bw()+
+        #         theme( axis.text=element_text(family="Helvetica", size=8),text=element_text(family="Helvetica", size=12))
+        # })
         
         
         
