@@ -43,6 +43,7 @@ ui <- fluidPage(
     
     sidebarLayout(
         sidebarPanel(
+            p("Day one is 01/22/2020."),
             selectInput("state1", "First state to compare:",
                         state_list,
                         selected = "CA"),
@@ -150,12 +151,13 @@ server <- function(input, output) {
             boxdata=tibble(state=c(str_c(input$state1, " 1"), str_c(input$state1, " 2")), medians=c(qs1[2],qs2[2]) , lower=c(qs1[1],qs2[1]), upper=c(qs1[3],qs2[3]))
             
             ggplot(data=boxdata , aes(state,medians))+
-                geom_point() +
-                geom_errorbar(aes(ymin=lower,ymax=upper),  width=0.1 )+
-                scale_y_continuous(limits=c(0,10),name="Doubling Time")+
+                geom_point(sie=5) +
+                geom_errorbar(aes(ymin=lower,ymax=upper),  width=0.5 )+
+                scale_y_continuous(limits=c(0,10),name="Days until cases double")+
                 annotate("text", x=c(1,2),
                          y=c(qs1[1]-.5,qs2[1]-.5), label= c(str_c(input$state1, " 1"),str_c(input$state2, " 2")),
                          size=5)+
+                 coord_fixed(ratio = 1/5) +
                 theme_bw()+
                 theme( axis.text=element_text(family="Helvetica", size=8),text=element_text(family="Helvetica", size=12))
         })
@@ -171,7 +173,7 @@ server <- function(input, output) {
         #         geom_ribbon(data=filter(dd2,x>qs2[[1]] & x<qs2[[3]]),aes(ymax=rely),ymin=0,
         #                     fill="#D95F02",colour=NA,alpha=0.5)+
         #         scale_y_continuous(limits=c(0,1.5),name="Posterior Density")+
-        #         scale_x_continuous(name="Doubling Time", limits=c(1, 8)) +
+        #         scale_x_continuous(name="Days until cases double", limits=c(1, 8)) +
         #         annotate("text", x=c(qs1[[2]],qs2[[2]]),
         #                  y=1.2, label= c(str_c(input$state1, " 1"),str_c(input$state2, " 2")),
         #                  size=3)+
