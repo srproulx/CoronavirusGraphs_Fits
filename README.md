@@ -6,3 +6,9 @@ I've also included a very simple Bayesian model fitting approach where we simply
 
 The disease incidence data are from Johns Hopkins CSSE available at https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data/csse_covid_19_time_series
 
+
+NOTE: Johns Hopkins changed their data format.
+
+Two other sources of data are now being used here. One is the NY Times dataset. The other is from covidtracker.com
+
+Added is an Rmd file that looks at state and county level data.
