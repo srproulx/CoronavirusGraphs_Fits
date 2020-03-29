@@ -1,0 +1,372 @@
+---
+title: "State covid growth rates"
+author: "Stephen R. Proulx"
+date: "3/26/2020"
+output: html_document
+---
+This uses two different data sets to estimate state and county level growth rates. One source is covidtracking.com which collates data from a number of sources. It's very interesting, but may be less precise. The other is the NY Times data release which is specifically useful for county level data. The code for esitmating is fragile, and for the state level data keeps breaking for unknown reasons. The problem is with the stan part, it might be that somehow the number of new cases is processed to be 0 or negative? 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+library(tidyverse)
+library(lubridate)
+library(rstan)
+options(mc.cores = parallel::detectCores())
+```
+
+##Gather and process the data
+```{r loaddata , include=TRUE, cache=TRUE}
+
+confirmed_sheet<-read.csv("http://covidtracking.com/api/states/daily.csv") %>% view()
+
+
+confirmed_long <-  confirmed_sheet%>%
+  mutate(date=date(dateChecked))%>% 
+  mutate(delta.days=period_to_seconds(days(ymd(date) - ymd(20200122)))/(60*60*24)) %>% #calculate days since data began being collected
+  as_tibble()  
+
+
+maxdays=max(confirmed_long$delta.days)
+
+```
+
+
+```{r plotStateTotals}
+ 
+
+
+ggplot(data=filter(confirmed_long,positive>30,delta.days>55) , aes(x=delta.days,y=log(positive, base=10) ,color=state,  group=state)) +
+  geom_point()+
+    geom_smooth( method = "lm" )+  
+  scale_y_continuous( limits=c(1,5),breaks=c(1,2,3,4), labels=c(10,100,1000,10000))+
+  labs( x="days since Jan 22" , y="cases per state")
+
+
+```
+ 
+ 
+ 
+```{ r writestatecompare , eval=FALSE}
+
+sink("model_compare_states.stan")
+cat("
+
+
+
+    data {
+//    int total_datapoints ; // how much data is there?
+    int num_states ; //how many states
+    int maxmaxdays ; // the largest number of days in any datases
+//    int<lower=0> maxdays[num_states]; // number of days in each state's dataset
+    int total_cases[num_states, maxmaxdays] ; // observed cases
+//    int days[total_datapoints] ; //day index within each dataset
+//    int dataset[total_datapoints] ; //index for which dataset the data are from
+    real pstrength ; // strength of the prior
+
+    }
+    transformed data{
+    int new_cases[num_states , maxmaxdays] ; // place to store the number of new cases
+
+    for(j in 1:num_states){
+    for(i in 1:(maxmaxdays-1)){
+    new_cases[j][i]=total_cases[j][i+1]-total_cases[j][i];
+    }
+    }
+    }
+    parameters {
+    real <lower=0, upper=1> mean_lambda ; // the mean lambda of all the states
+    real lambda_diff[num_states] ; // the log difference of the state  lambda from mean_lambda. Need to make sure that priors make these identifiable.
+    }
+    transformed parameters{
+    real <lower=0, upper=10> lambda[num_states]; // the two lambdas are given by log scale transformations using the parameter labmda_diff
+    for(j in 1:num_states){
+    lambda[j] = mean_lambda * exp(lambda_diff[j]); //this defines state specific lambda as a transform that is a log change from the mean_lambda.
+    }
+    }
+    model {
+
+    lambda_diff ~ normal(0,pstrength) ; // Prior is that all the states have the same growth rate.
+
+
+    for(j in 1:num_states){
+//    print("j = ",j," lambda  ",lambda[j]);
+    for(i in 1:(maxmaxdays-1)){
+    //print("j = ",j," i = ",i,"lambda[j] = " ,lambda[j]," total cases = ",total_cases[j][i]);
+    new_cases[j][i] ~ poisson(total_cases[j][i] * lambda[j] ); // update for each time step is the sum of Poisson RVs with mean lambda
+
+    }
+    }
+
+    }
+
+
+      
+    
+    ",fill = TRUE)
+sink()
+
+```
+
+```{r compile_stan , eval=TRUE}
+
+mod <- stan_model(file = 'model_compare_states.stan')
+```
+
+```{r prep_states}
+#argh not getting this. Want to create a list of dataframes I think....
+
+daysback=10
+the_states=filter(confirmed_long, delta.days==(maxdays-10),positive>30) %>% select(state) 
+num_states=nrow(the_states)
+
+the_states<- mutate(the_states,statechar=as.character(state)) 
+#mydata<-filter(confirmed_long, delta.days==maxdays,state=="CA") %>% mutate(delta.days=-1)
+
+
+mydata=filter(confirmed_long, state=="CA",delta.days==1)
+for(i in the_states$statechar){
+mydata.sub=filter(confirmed_long, state==i,delta.days>(maxdays-daysback-1),delta.days<maxdays+1)
+mydata<-bind_rows(mydata,mydata.sub)
+}
+
+mydata<-filter(mydata,delta.days>1)%>% rename(cases=positive) 
+
+
+spread_cases <- select(mydata,state,cases,delta.days) %>% spread(delta.days,cases) 
+ordered_states <- spread_cases$state
+
+case_matrix <- select(spread_cases , -state) %>% as.matrix()
+
+dimnames(case_matrix)=NULL
+
+stan_data <-list(num_states=num_states ,maxmaxdays=(daysback+1),
+                 total_cases=case_matrix , pstrength =0.5) 
+
+
+
+fit_StateCompare <- sampling(mod, 
+                data =stan_data, chains = 8,iter = 1000, seed = 2131232 )
+
+print(fit_StateCompare)
+
+
+plot(fit_StateCompare, pars=c("mean_lambda","lambda"))
+
+the_states
+
+```
+
+
+```{r CompareStates}
+
+states_indexed <-  tibble::rowid_to_column(the_states, "ID") %>%
+  rename(state.index=ID) 
+
+
+lambda_draws<-as.data.frame(rstan::extract(fit_StateCompare,pars=c("lambda")))%>%
+   gather( key="parameter", value = "pos_draw")%>% 
+  separate(parameter,c("parameter.name","state.index"),sep="\\.",remove = FALSE) %>% 
+  mutate(state.index=as.integer(state.index) , dtime=log(2)/(log(1+pos_draw))) %>%
+  left_join(states_indexed)  %>% as_tibble()
+
+
+ggplot(data=lambda_draws ) +
+            geom_violin( aes(y=dtime,x=state ,  fill=state))+
+            scale_y_continuous(limits=c(1,7),name="Days until cases double")+
+            theme_bw()+
+            theme( axis.text=element_text(family="Helvetica", size=8),text=element_text(family="Helvetica", size=12),legend.position = "none")
+        
+
+
+
+statelats <-read.csv("statelatlong.csv") %>% rename(state=State)
+lambda_draws <- lambda_draws %>% left_join(statelats)%>% view()
+lambda_draws$state <- reorder(lambda_draws$state,lambda_draws$Latitude)
+
+
+ggplot(data=lambda_draws ) +
+            geom_violin( aes(y=dtime,x=state ,  fill=state))+
+            scale_y_continuous(limits=c(1,7),name="Days until cases double")+
+            theme_bw()+
+            theme( axis.text=element_text(family="Helvetica", size=8),text=element_text(family="Helvetica", size=12),legend.position = "none")
+        
+
+
+
+```
+
+
+
+
+##NY Times data at the County level
+County level data from the NY times
+```{r countydata}
+
+
+NYTimes_sheet<-read.csv("https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-counties.csv") 
+
+
+county_data <-  NYTimes_sheet%>%
+  mutate(delta.days=period_to_seconds(days(ymd(date) - ymd(20200121)))/(60*60*24)) %>% #calculate days since data began being collected
+  as_tibble()  %>% view()
+
+
+maxdays=max(county_data$delta.days)
+
+
+```
+
+```{r santabarbara}
+
+
+ggplot(data=filter(county_data,delta.days>45,county == "Santa Barbara") , aes(x=delta.days,y=log(cases, base=10) ,color=state,  group=state)) +
+  geom_point()+
+    geom_smooth( method = "lm" )+  
+  scale_y_continuous( limits=c(1,5),breaks=c(1,2,3,4), labels=c(10,100,1000,10000))+
+  labs( x="days since Jan 22" , y="cases per state")
+
+
+```
+
+```{r california}
+
+
+ggplot(data=filter(county_data,delta.days>45,state == "California") , aes(x=delta.days,y=log(cases, base=10) ,color=county,  group=county)) +
+  geom_point()+
+    geom_smooth( method = "lm" )+  
+  scale_y_continuous( limits=c(1,5),breaks=c(1,2,3,4), labels=c(10,100,1000,10000))+
+  labs( x="days since Jan 22" , y="cases per state")
+
+
+```
+
+
+```{r prep_counties}
+
+cacountydata=filter(county_data ,state == "California" ) # removed Orange county because of duplicate entries
+daysback=5
+the_counties=filter(county_data, state=="California",delta.days==(maxdays-daysback),cases>10) %>% select(county) 
+num_counties=nrow(the_counties)
+
+the_counties<- mutate(the_counties,county=as.character(county)) 
+#mydata<-filter(confirmed_long, delta.days==maxdays,state=="CA") %>% mutate(delta.days=-1)
+
+
+
+
+mydata=filter(cacountydata, state=="California", county=="Santa Barbara",delta.days==1)
+for(i in the_counties$county){
+mydata.sub=filter(cacountydata, state=="California", county==i,delta.days>(maxdays-daysback-1),delta.days<maxdays+1)
+mydata<-bind_rows(mydata,mydata.sub)
+}
+
+mydata<-filter(mydata,delta.days>1)
+
+
+
+spread_cases <- select( mydata ,county,cases,delta.days) %>% spread(delta.days,cases) 
+ordered_counties <- spread_cases$county
+
+case_matrix <- select(spread_cases , -county) %>% as.matrix()
+
+dimnames(case_matrix)=NULL
+
+stan_data <-list(num_states=num_counties ,maxmaxdays=(daysback+1),
+                 total_cases=case_matrix , pstrength =0.05) 
+
+
+
+fit_CountyCompare <- sampling(mod, 
+                data =stan_data, chains = 8,iter = 1000, seed = 2131232 )
+
+```
+
+```{r compareCounties}
+
+counties_indexed <-  tibble::rowid_to_column(the_counties, "ID") %>%
+  rename(county.index=ID) 
+
+
+lambda_draws<-as.data.frame(rstan::extract(fit_CountyCompare,pars=c("lambda")))%>%
+   gather( key="parameter", value = "pos_draw")%>% 
+  separate(parameter,c("parameter.name","county.index"),sep="\\.",remove = FALSE) %>% 
+  mutate(county.index=as.integer(county.index) , dtime=log(2)/(log(1+pos_draw))) %>%
+  left_join(counties_indexed)  %>% as_tibble()
+
+
+ggplot(data=lambda_draws ) +
+            geom_violin( aes(y=dtime,x=county ,  fill=county))+
+            scale_y_continuous(limits=c(1,7),name="Days until cases double")+
+            theme_bw()+ 
+            theme( axis.text=element_text(family="Helvetica", size=8,angle=90),text=element_text(family="Helvetica", size=12),legend.position = "none")
+        
+
+
+
+```
+
+```{r prep_counties_US}
+
+cacountydata=county_data  %>% unite(state_county, c("state", "county"), remove=FALSE)  
+
+daysback=10
+the_counties=filter(cacountydata,delta.days==(maxdays-daysback),cases>50) %>% select(state_county) 
+num_counties=nrow(the_counties)
+
+the_counties<- mutate(the_counties,county=as.character(state_county)) 
+
+
+
+mydata=filter(cacountydata, state=="California", county=="Santa Barbara",delta.days==1)
+for(i in the_counties$state_county){
+mydata.sub=filter(cacountydata,  state_county==i,delta.days>(maxdays-daysback-1),delta.days<maxdays+1)
+mydata<-bind_rows(mydata,mydata.sub)
+}
+
+mydata<-filter(mydata,delta.days>1)
+
+
+
+spread_cases <- select( mydata ,state_county,cases,delta.days) %>% spread(delta.days,cases) 
+ordered_counties <- spread_cases$state_county
+
+case_matrix <- select(spread_cases , -state_county) %>% as.matrix()
+
+dimnames(case_matrix)=NULL
+
+stan_data <-list(num_states=num_counties ,maxmaxdays=(daysback+1),
+                 total_cases=case_matrix , pstrength =0.05) 
+
+
+
+fit_CountyCompare <- sampling(mod, 
+                data =stan_data, chains = 8,iter = 1000, seed = 2131232 )
+
+```
+
+
+```{r compareCountiesUS}
+
+counties_indexed <-  tibble::rowid_to_column(the_counties, "ID") %>%
+  rename(county.index=ID) 
+
+
+lambda_draws<-as.data.frame(rstan::extract(fit_CountyCompare,pars=c("lambda")))%>%
+   gather( key="parameter", value = "pos_draw")%>% 
+  separate(parameter,c("parameter.name","county.index"),sep="\\.",remove = FALSE) %>% 
+  mutate(county.index=as.integer(county.index) , dtime=log(2)/(log(1+pos_draw))) %>%
+  left_join(counties_indexed)  %>% as_tibble()
+
+
+ggplot(data=lambda_draws ) +
+            geom_violin( aes(y=dtime,x=county ,  fill=county))+
+            scale_y_continuous(limits=c(1,7),name="Days until cases double")+
+            theme_bw()+
+            theme( axis.text=element_text(family="Helvetica", size=8,angle=90),text=element_text(family="Helvetica", size=12),legend.position = "none")
+        
+
+
+
+```
