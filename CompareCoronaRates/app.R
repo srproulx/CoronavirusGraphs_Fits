@@ -12,12 +12,11 @@ options(mc.cores = parallel::detectCores())
 library(bayesplot)
 
 
-confirmed_sheet<-read.csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv") %>%
-    select(-Lat, -Long)
-deaths_sheet <- read.csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Deaths.csv")%>%
-    select(-Lat, -Long)
-recovered_sheet <- read.csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Recovered.csv")%>%
-    select(-Lat, -Long) 
+
+confirmed_sheet<-read.csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv") %>% 
+  select(-Lat, -Long)
+
+
 
 
 
@@ -63,15 +62,12 @@ CanadianTotals <- filter(confirmed_long,Country.Region=="Canada" ) %>%
 
 confirmed_long2 <- bind_rows(filter(confirmed_long,Country.Region!="Canada",Country.Region!="China",Country.Region!="US"),USTotals,ChinaTotals,CanadianTotals) 
 
-
+mod <- readRDS("model.rds") 
 
 #make list of countries by most cases
 country_list <- confirmed_long2 %>% filter(delta.days==maxdays) %>% arrange(desc(cases)) %>% select(Country.Region)
 #countries in alphabetical order but only with more than 100 cases
 country_list_alpha <- confirmed_long2 %>% filter(delta.days==maxdays,cases>100) %>% arrange(Country.Region) %>% select(Country.Region)
-
-mod <- readRDS("model.rds") 
-
 
 
 # Define UI
@@ -85,16 +81,16 @@ ui <- fluidPage(
         sidebarPanel(
             selectInput("country1", "Country 1:",
                         country_list,
-                        selected = "US"),
+                        selected = "Canada"),
             selectInput("country2", "Country 2:",
                         country_list_alpha,
-                        selected = "Italy"),
+                        selected = "US"),
             
             sliderInput("start1",
                         "Start day 1:",
                         min = 1,
                         max = maxdays,
-                        value = 38),
+                        value = 62),
             sliderInput("end1",
                         "End day 1:",
                         min = 1,
@@ -104,7 +100,7 @@ ui <- fluidPage(
                         "Start day 2:",
                         min = 1,
                         max = maxdays,
-                        value = 45),
+                        value = 62),
             sliderInput("end2",
                         "End day 2:",
                         min = 1,
@@ -145,19 +141,23 @@ server <- function(input, output) {
     
     maxdays=c(max(mydata.sub1$days),max(mydata.sub2$days))
     
+
+    
     mydata.sub.total <-bind_rows(mydata.sub1,mydata.sub2) %>% group_by(dataset) %>% arrange(days, .by_group = TRUE) %>%
-        rename(total_cases=cases) 
+      rename(total_cases=cases) %>% mutate(total_cases=as.integer(total_cases)) %>% 
+      mutate(days=as.integer(days))
+    
     
     total_datapoints=nrow(mydata.sub.total)
     
     stan_data <- c(mydata.sub.total[c("days","total_cases","dataset")],tocomp[c("country")],list(maxdays=maxdays,total_datapoints=total_datapoints , pstrength = input$pstrength)) 
     
- 
-#    fit_poissCompare <- sampling(mod, 
-#                    data =stan_data, chains = 8,iter = 5000, seed = 2131231 )
-                             
-   fit_poissCompare <- stan(file = 'model_compare2.stan', 
-                             data =stan_data, chains = 8,iter = 5000, seed = 2131231 )
+
+    fit_poissCompare <- sampling(mod, 
+                             data =stan_data,chains=2,iter = 2000, seed = 2131231 )
+    
+    # fit_poissCompare <- stan(file = 'model_compare2.stan', 
+    #                          data =stan_data,iter = 5000, seed = 2131231 )
     
     
     tmp<-as.data.frame(rstan::extract(fit_poissCompare,pars=c("mean_lambda","lambda_diff","lambda[1]","lambda[2]"))) %>% 
@@ -184,21 +184,29 @@ server <- function(input, output) {
     dd2<-mutate(dd2,rely=y/maxdd2)
     
     
+    upperlim=max(c(max(qs1[3],qs2[3])+0.5, 8))
+    lowerlim=min(c(min(qs1[1],qs2[1])-0.5,3))
+    ddata<-bind_rows(mutate(tmp1,country=str_c(input$country1, " 1")),mutate(tmp2,country=str_c(input$country2, " 2"))) 
+    
+    
+    ddata <- as_tibble(ddata)  %>% mutate(country=as.factor(country)) 
+    
+    ddata$country  <- factor(ddata$country , levels = c(str_c(input$country1, " 1"),str_c(input$country2, " 2")))
+    
+    
+  #  ddata$country <- reorder(ddata$country,c(str_c(input$country1, " 1"),str_c(input$country2, " 2")))
+    
     output$compare <-  renderPlot({   
-        ggplot(data=dd1 , aes(x,rely))+
-            geom_line(data=dd1)+
-            geom_ribbon(data=filter(dd1,x>qs1[[1]] & x<qs1[[3]]),aes(ymax=rely),ymin=0,
-                        fill="#1B9E77",colour=NA,alpha=0.5)+
-            geom_line(data=dd2)+
-            geom_ribbon(data=filter(dd2,x>qs2[[1]] & x<qs2[[3]]),aes(ymax=rely),ymin=0,
-                        fill="#D95F02",colour=NA,alpha=0.5)+
-            scale_y_continuous(limits=c(0,1.5),name="Posterior Density")+
-            scale_x_continuous(name="Doubling Time", limits=c(2, 8)) +
-            annotate("text", x=c(qs1[[2]],qs2[[2]]),
-                     y=1.2, label= c(str_c(input$country1, " 1"),str_c(input$country2, " 2")),
-                     size=3)+
-            theme_bw()+
-            theme( axis.text=element_text(family="Helvetica", size=8),text=element_text(family="Helvetica", size=12))
+      ggplot(data=ddata ) +
+        geom_violin( aes(y=dtime,x=country ,  fill=country))+
+        scale_y_continuous(limits=c(lowerlim,upperlim),name="Days until cases double")+
+        scale_color_manual(breaks = c(str_c(input$country1, " 1"),str_c(input$country1, " 2")),values=c( "magenta","blue"))+
+        annotate("text", x=c(0.8,1.8),
+                 y=c(qs1[2]+0.25,qs2[2]+0.25), label= c(str_c(input$country1, " 1"),str_c(input$country2, " 2")),
+                 size=3)+
+        theme_bw()+
+        theme( axis.text=element_text(family="Helvetica", size=8),text=element_text(family="Helvetica", size=12),legend.position = "none")
+      
     })
         
     
